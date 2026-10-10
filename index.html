@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>霓虹貪吃蛇</title>
+<style>
+  :root {
+    --bg: #07060f;
+    --panel: #120f24;
+    --snake: #39ff14;
+    --food: #ff2fd6;
+    --text: #e8e6ff;
+    --muted: #8a86b3;
+    --accent: #00e5ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: radial-gradient(ellipse at top, #1a1240 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; padding: 16px; overflow: hidden;
+    touch-action: none; user-select: none;
+  }
+  h1 {
+    margin: 0; font-size: clamp(22px, 5vw, 34px); letter-spacing: 4px;
+    color: var(--accent); text-shadow: 0 0 8px var(--accent), 0 0 24px var(--accent);
+  }
+  .hud { display: flex; gap: 24px; font-size: 15px; color: var(--muted); }
+  .hud b { color: var(--text); font-size: 20px; margin-left: 6px; }
+  .wrap { position: relative; width: min(92vw, 70vh, 560px); aspect-ratio: 1; }
+  canvas {
+    width: 100%; height: 100%; display: block; border-radius: 12px;
+    background: var(--panel);
+    box-shadow: 0 0 0 2px #2a2455, 0 0 30px rgba(0, 229, 255, .25);
+  }
+  .overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px; text-align: center;
+    background: rgba(7, 6, 15, .72); border-radius: 12px; backdrop-filter: blur(2px);
+    transition: opacity .2s;
+  }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+  .overlay h2 { margin: 0; font-size: 30px; color: var(--food); text-shadow: 0 0 12px var(--food); }
+  .overlay p { margin: 0; color: var(--muted); line-height: 1.7; }
+  button {
+    font: inherit; font-size: 17px; padding: 10px 28px; border-radius: 999px; cursor: pointer;
+    color: var(--bg); background: var(--snake); border: none;
+    box-shadow: 0 0 16px var(--snake);
+  }
+  button:hover { filter: brightness(1.15); }
+  .hint { font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+  <h1>NEON SNAKE</h1>
+  <div class="hud">
+    <span>分數<b id="score">0</b></span>
+    <span>最高<b id="best">0</b></span>
+    <span>速度<b id="level">1</b></span>
+  </div>
+  <div class="wrap">
+    <canvas id="game"></canvas>
+    <div class="overlay" id="overlay">
+      <h2 id="title">準備好了嗎？</h2>
+      <p id="msg">方向鍵 / WASD 移動・空白鍵暫停<br>手機：在畫面上滑動</p>
+      <button id="start">開始遊戲</button>
+    </div>
+  </div>
+  <div class="hint">每吃 5 顆，速度提升一級</div>
+
+<script>
+const GRID = 20;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const $ = id => document.getElementById(id);
+
+let cell, snake, dir, dirQueue, food, score, best, level, tickMs, running, paused, lastTick, particles;
+
+best = 0;
+try { best = Number(localStorage.getItem('neonSnakeBest')) || 0; } catch (e) {}
+$('best').textContent = best;
+
+function resize() {
+  const size = canvas.getBoundingClientRect().width * devicePixelRatio;
+  canvas.width = canvas.height = size;
+  cell = size / GRID;
+}
+addEventListener('resize', resize);
+resize();
+
+function reset() {
+  snake = [{x: 9, y: 10}, {x: 8, y: 10}, {x: 7, y: 10}];
+  dir = {x: 1, y: 0};
+  dirQueue = [];
+  score = 0; level = 1; tickMs = 140;
+  particles = [];
+  placeFood();
+  updateHud();
+}
+
+function placeFood() {
+  do {
+    food = {x: Math.floor(Math.random() * GRID), y: Math.floor(Math.random() * GRID)};
+  } while (snake.some(s => s.x === food.x && s.y === food.y));
+}
+
+function updateHud() {
+  $('score').textContent = score;
+  $('best').textContent = best;
+  $('level').textContent = level;
+}
+
+function turn(x, y) {
+  // 用佇列緩衝輸入，避免快速連按時直接掉頭撞到自己
+  const last = dirQueue.length ? dirQueue[dirQueue.length - 1] : dir;
+  if (last.x === -x && last.y === -y) return;
+  if (last.x === x && last.y === y) return;
+  if (dirQueue.length < 3) dirQueue.push({x, y});
+}
+
+function step() {
+  if (dirQueue.length) dir = dirQueue.shift();
+  const head = {x: snake[0].x + dir.x, y: snake[0].y + dir.y};
+
+  const hitWall = head.x < 0 || head.y < 0 || head.x >= GRID || head.y >= GRID;
+  // 尾巴這一格在本回合會移開，所以不算撞到
+  const hitSelf = snake.slice(0, -1).some(s => s.x === head.x && s.y === head.y);
+  if (hitWall || hitSelf) return gameOver();
+
+  snake.unshift(head);
+  if (head.x === food.x && head.y === food.y) {
+    score++;
+    burst(food.x, food.y);
+    beep(440 + score * 20);
+    if (score % 5 === 0) { level++; tickMs = Math.max(55, tickMs - 12); }
+    placeFood();
+    updateHud();
+  } else {
+    snake.pop();
+  }
+}
+
+function burst(gx, gy) {
+  const cx = (gx + .5) * cell, cy = (gy + .5) * cell;
+  for (let i = 0; i < 24; i++) {
+    const a = Math.random() * Math.PI * 2, v = (1 + Math.random() * 3) * devicePixelRatio;
+    particles.push({x: cx, y: cy, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1});
+  }
+}
+
+let audio;
+function beep(freq, dur = .08, type = 'square') {
+  try {
+    audio = audio || new AudioContext();
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(.06, audio.currentTime);
+    g.gain.exponentialRampToValueAtTime(.0001, audio.currentTime + dur);
+    o.connect(g).connect(audio.destination);
+    o.start(); o.stop(audio.currentTime + dur);
+  } catch (e) {}
+}
+
+function draw(now) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // 背景格線
+  ctx.strokeStyle = 'rgba(120, 110, 200, .08)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < GRID; i++) {
+    ctx.beginPath(); ctx.moveTo(i * cell, 0); ctx.lineTo(i * cell, canvas.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * cell); ctx.lineTo(canvas.width, i * cell); ctx.stroke();
+  }
+
+  // 食物：呼吸般的脈動光
+  const pulse = 1 + Math.sin(now / 150) * .15;
+  ctx.shadowColor = '#ff2fd6'; ctx.shadowBlur = cell * 1.2;
+  ctx.fillStyle = '#ff2fd6';
+  ctx.beginPath();
+  ctx.arc((food.x + .5) * cell, (food.y + .5) * cell, cell * .32 * pulse, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 蛇：頭最亮，往尾巴漸層變暗
+  ctx.shadowColor = '#39ff14';
+  snake.forEach((s, i) => {
+    const t = i / snake.length;
+    ctx.shadowBlur = i === 0 ? cell : cell * .5;
+    ctx.fillStyle = `hsl(${110 + t * 60}, 100%, ${60 - t * 25}%)`;
+    const pad = cell * (i === 0 ? .06 : .12);
+    roundRect(s.x * cell + pad, s.y * cell + pad, cell - pad * 2, cell - pad * 2, cell * .25);
+  });
+  ctx.shadowBlur = 0;
+
+  // 蛇眼
+  const h = snake[0], ex = dir.y !== 0 ? .22 : 0, ey = dir.x !== 0 ? .22 : 0;
+  ctx.fillStyle = '#07060f';
+  for (const sgn of [-1, 1]) {
+    ctx.beginPath();
+    ctx.arc((h.x + .5 + dir.x * .18 + ex * sgn) * cell, (h.y + .5 + dir.y * .18 + ey * sgn) * cell, cell * .08, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 粒子
+  particles = particles.filter(p => p.life > 0);
+  for (const p of particles) {
+    p.x += p.vx; p.y += p.vy; p.vx *= .94; p.vy *= .94; p.life -= .03;
+    ctx.globalAlpha = Math.max(p.life, 0);
+    ctx.fillStyle = '#ff9cf0';
+    ctx.fillRect(p.x, p.y, 3 * devicePixelRatio, 3 * devicePixelRatio);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.fill();
+}
+
+function loop(now) {
+  if (running && !paused && now - lastTick >= tickMs) {
+    lastTick = now;
+    step();
+  }
+  draw(now);
+  requestAnimationFrame(loop);
+}
+
+function start() {
+  reset();
+  running = true; paused = false; lastTick = performance.now();
+  $('overlay').classList.add('hidden');
+  beep(660, .1, 'triangle');
+}
+
+function gameOver() {
+  running = false;
+  beep(110, .4, 'sawtooth');
+  const isRecord = score > best;
+  if (isRecord) {
+    best = score;
+    try { localStorage.setItem('neonSnakeBest', best); } catch (e) {}
+  }
+  updateHud();
+  $('title').textContent = isRecord && score > 0 ? '新紀錄！🎉' : '遊戲結束';
+  $('msg').innerHTML = `你得到了 <b style="color:#fff">${score}</b> 分`;
+  $('start').textContent = '再玩一次';
+  $('overlay').classList.remove('hidden');
+}
+
+function togglePause() {
+  if (!running) return;
+  paused = !paused;
+  $('title').textContent = '暫停中';
+  $('msg').textContent = '按空白鍵繼續';
+  $('start').textContent = '繼續';
+  $('overlay').classList.toggle('hidden', !paused);
+}
+
+$('start').addEventListener('click', () => {
+  if (running && paused) togglePause(); else start();
+});
+
+const KEYS = {
+  ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+  w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0],
+};
+addEventListener('keydown', e => {
+  const k = KEYS[e.key] || KEYS[e.key.toLowerCase()];
+  if (k) { e.preventDefault(); if (running && !paused) turn(...k); return; }
+  if (e.key === ' ') {
+    e.preventDefault();
+    if (!running) start(); else togglePause();
+  }
+  if (e.key === 'Enter' && !running) start();
+});
+
+// 手機滑動操作
+let touchStart = null;
+addEventListener('touchstart', e => { touchStart = e.touches[0]; }, {passive: true});
+addEventListener('touchend', e => {
+  if (!touchStart || !running || paused) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - touchStart.clientX, dy = t.clientY - touchStart.clientY;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return;
+  if (Math.abs(dx) > Math.abs(dy)) turn(Math.sign(dx), 0); else turn(0, Math.sign(dy));
+  touchStart = null;
+});
+
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
